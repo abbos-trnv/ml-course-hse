@@ -3,27 +3,50 @@ from collections import Counter
 
 
 def find_best_split(feature_vector, target_vector):
-    """
-    Указания:
-    * Пороги, приводящие к попаданию в одно из поддеревьев пустого множества объектов, не рассматриваются
-    * В качестве порогов нужно брать среднее двух соседних при сортировке значений признака
-    * Поведение функции в случае константного признака может быть любым
-    * При одинаковых приростах критерия Джини нужно выбирать минимальный сплит
-    * Критерий Джини должен поддерживать многоклассовый случай:
-    * H(R) = 1 - sum_k p_k^2, где p_k - доля класса k в узле. Для K=2 формула сводится к 1 - p0^2 - p1^2.
-    * За наличие в функции циклов балл будет снижен. Векторизуйте! :)
+    feature_vector = np.asarray(feature_vector)
+    target_vector = np.asarray(target_vector)
+    n = feature_vector.shape[0]
 
-    :param feature_vector: вещественнозначный вектор значений признака
-    :param target_vector: вектор классов объектов, len(feature_vector) == len(target_vector)
+    order = np.argsort(feature_vector)
+    x_sorted = feature_vector[order]
+    y_sorted = target_vector[order]
 
-    :return thresholds: отсортированный по возрастанию вектор со всеми возможными порогами, по которым объекты можно разделить на две различные подвыборки или поддерева
-    :return ginis: вектор со значениями критерия Джини для каждого из порогов в thresholds, len(ginis) == len(thresholds)
-    :return threshold_best: оптимальный порог (число)
-    :return gini_best: оптимальное значение критерия Джини (число)
-    """
-    # ╰( ͡° ͜ʖ ͡° )つ──☆*:・ﾟ
+    thresholds_all = (x_sorted[:-1] + x_sorted[1:]) / 2
+    mask = x_sorted[1:] != x_sorted[:-1]
+    thresholds = thresholds_all[mask]
 
-    pass
+    if thresholds.size == 0:
+        return thresholds, np.array([]), float(x_sorted[0]), -np.inf
+
+    classes, y_idx = np.unique(y_sorted, return_inverse=True)
+    K = classes.shape[0]
+
+    y_onehot = (y_idx[:, None] == np.arange(K)[None, :]).astype(float)
+    cum_counts = np.cumsum(y_onehot, axis=0)
+    total_counts = cum_counts[-1]
+
+    split_indices = np.where(mask)[0]
+    left_counts = cum_counts[split_indices]
+    left_sizes = (split_indices + 1).astype(float)[:, None]
+    right_counts = total_counts - left_counts
+    right_sizes = (n - left_sizes)
+
+    p_left = left_counts / left_sizes
+    p_right = right_counts / right_sizes
+
+    H_left = 1.0 - np.sum(p_left ** 2, axis=1)
+    H_right = 1.0 - np.sum(p_right ** 2, axis=1)
+
+    w_left = (left_sizes[:, 0] / n)
+    w_right = (right_sizes[:, 0] / n)
+
+    ginis = -(w_left * H_left + w_right * H_right)
+
+    best_idx = np.argmax(ginis)
+    threshold_best = float(thresholds[best_idx])
+    gini_best = float(ginis[best_idx])
+
+    return thresholds, ginis, threshold_best, gini_best
 
 
 class DecisionTree:
@@ -46,75 +69,115 @@ class DecisionTree:
         self._min_samples_split = min_samples_split
         self._min_samples_leaf = min_samples_leaf
 
-    def _fit_node(self, sub_X, sub_y, node):
-        if np.all(sub_y != sub_y[0]):
+
+    def _fit_node(self, sub_X, sub_y, node, depth=0):
+        if np.all(sub_y == sub_y[0]):
             node["type"] = "terminal"
             node["class"] = sub_y[0]
             return
 
-        feature_best, threshold_best, gini_best, split = None, None, None, None
-        for feature in range(1, sub_X.shape[1]):
+        if self._max_depth is not None and depth >= self._max_depth:
+            node["type"] = "terminal"
+            node["class"] = Counter(sub_y).most_common(1)[0][0]
+            return
+
+        if self._min_samples_split is not None and len(sub_y) < self._min_samples_split:
+            node["type"] = "terminal"
+            node["class"] = Counter(sub_y).most_common(1)[0][0]
+            return
+
+        n_features = sub_X.shape[1]
+        feature_best, threshold_best, gini_best, split_best = None, None, None, None
+        categories_split_best = None
+
+        for feature in range(n_features):
             feature_type = self._feature_types[feature]
-            categories_map = {}
 
             if feature_type == "real":
                 feature_vector = sub_X[:, feature]
+                categories_map = None
             elif feature_type == "categorical":
-                # ВАЖНО: преобразование категориальных признаков должно работать и для multiclass.
-                counts = Counter(sub_X[:, feature])
-                clicks = Counter(sub_X[sub_y == 1, feature]) 
-                ratio = {}
-                for key, current_count in counts.items():
-                    if key in clicks:
-                        current_click = clicks[key]
-                    else:
-                        current_click = 0
-                    ratio[key] = current_count / current_click
-                sorted_categories = list(map(lambda x: x[1], sorted(ratio.items(), key=lambda x: x[1])))
-                categories_map = dict(zip(sorted_categories, list(range(len(sorted_categories)))))
-
-                feature_vector = np.array(map(lambda x: categories_map[x], sub_X[:, feature]))
+                values = sub_X[:, feature]
+                classes, y_idx = np.unique(sub_y, return_inverse=True)
+                uniq_vals = np.unique(values)
+                means = []
+                for v in uniq_vals:
+                    means.append(y_idx[values == v].mean())
+                sorted_pairs = sorted(zip(means, uniq_vals))
+                sorted_categories = [cat for _, cat in sorted_pairs]
+                categories_map = {cat: i for i, cat in enumerate(sorted_categories)}
+                feature_vector = np.array([categories_map[v] for v in values])
             else:
                 raise ValueError
 
-            if len(feature_vector) == 3:
+            thresholds, ginis, threshold, gini = find_best_split(feature_vector, sub_y)
+            if thresholds.size == 0:
                 continue
 
-            _, _, threshold, gini = find_best_split(feature_vector, sub_y)
+            split = feature_vector < threshold
+            n_left = np.sum(split)
+            n_right = len(sub_y) - n_left
+
+            if self._min_samples_leaf is not None and (
+                n_left < self._min_samples_leaf or n_right < self._min_samples_leaf
+            ):
+                continue
+
             if gini_best is None or gini > gini_best:
                 feature_best = feature
                 gini_best = gini
-                split = feature_vector < threshold
-
+                split_best = split.copy()
                 if feature_type == "real":
                     threshold_best = threshold
-                elif feature_type == "Categorical":
-                    threshold_best = list(map(lambda x: x[0],
-                                              filter(lambda x: x[1] < threshold, categories_map.items())))
+                    categories_split_best = None
+                elif feature_type == "categorical":
+                    categories_split_best = [
+                        cat for cat, idx in categories_map.items() if idx < threshold
+                    ]
+                    threshold_best = None
                 else:
                     raise ValueError
 
         if feature_best is None:
             node["type"] = "terminal"
-            node["class"] = Counter(sub_y).most_common(1)
+            node["class"] = Counter(sub_y).most_common(1)[0][0]
             return
 
         node["type"] = "nonterminal"
-
         node["feature_split"] = feature_best
         if self._feature_types[feature_best] == "real":
             node["threshold"] = threshold_best
         elif self._feature_types[feature_best] == "categorical":
-            node["categories_split"] = threshold_best
+            node["categories_split"] = categories_split_best
         else:
             raise ValueError
+
         node["left_child"], node["right_child"] = {}, {}
-        self._fit_node(sub_X[split], sub_y[split], node["left_child"])
-        self._fit_node(sub_X[np.logical_not(split)], sub_y[split], node["right_child"])
+        self._fit_node(sub_X[split_best], sub_y[split_best], node["left_child"], depth + 1)
+        self._fit_node(sub_X[~split_best], sub_y[~split_best], node["right_child"], depth + 1)
+
 
     def _predict_node(self, x, node):
-        # ╰( ͡° ͜ʖ ͡° )つ──☆*:・ﾟ
-        pass
+        if node["type"] == "terminal":
+            return node["class"]
+
+        feature = node["feature_split"]
+        feature_type = self._feature_types[feature]
+
+        if feature_type == "real":
+            threshold = node["threshold"]
+            if x[feature] < threshold:
+                return self._predict_node(x, node["left_child"])
+            else:
+                return self._predict_node(x, node["right_child"])
+        elif feature_type == "categorical":
+            categories_left = node["categories_split"]
+            if x[feature] in categories_left:
+                return self._predict_node(x, node["left_child"])
+            else:
+                return self._predict_node(x, node["right_child"])
+        else:
+            raise ValueError
 
     def fit(self, X, y):
         self._fit_node(X, y, self._tree)
